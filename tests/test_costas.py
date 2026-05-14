@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import cmath
+import unittest
+
+from costaslab.analysis import rms_decision_error, sweep_frequency_offsets
+from costaslab.loop import coarse_fourth_power_phase, run_qpsk_costas_loop
+from costaslab.signal import hard_decision_qpsk, qpsk_symbols, rotate_symbols
+
+
+class CostasLoopTests(unittest.TestCase):
+    def test_qpsk_hard_decision_stays_on_constellation(self) -> None:
+        out = hard_decision_qpsk(complex(-0.2, 0.8))
+        self.assertAlmostEqual(abs(out), 1.0)
+        self.assertLess(out.real, 0.0)
+        self.assertGreater(out.imag, 0.0)
+
+    def test_coarse_fourth_power_phase_improves_constellation_alignment(self) -> None:
+        symbols = qpsk_symbols(256, seed=11)
+        rotated = rotate_symbols(symbols, phase_offset=0.7, seed=1)
+        estimate = coarse_fourth_power_phase(rotated)
+        corrected = [sample * cmath.exp(-1j * estimate) for sample in rotated]
+        self.assertLess(rms_decision_error(corrected), rms_decision_error(rotated))
+
+    def test_costas_loop_reduces_decision_error(self) -> None:
+        symbols = qpsk_symbols(900, seed=7)
+        received = rotate_symbols(symbols, phase_offset=0.85, freq_offset=0.022, noise_std=0.04, seed=8)
+        trace = run_qpsk_costas_loop(received)
+        raw = rms_decision_error(received, trim=180)
+        tracked = rms_decision_error(trace.tracked, trim=180)
+        self.assertLess(tracked, 0.55 * raw)
+
+    def test_zero_offset_stays_well_locked(self) -> None:
+        symbols = qpsk_symbols(600, seed=3)
+        received = rotate_symbols(symbols, phase_offset=0.2, freq_offset=0.0, noise_std=0.02, seed=4)
+        trace = run_qpsk_costas_loop(received)
+        self.assertLess(rms_decision_error(trace.tracked, trim=120), 0.12)
+
+    def test_offset_sweep_shows_tracking_help_near_center(self) -> None:
+        rows = sweep_frequency_offsets([-0.01, 0.0, 0.01], count=700)
+        for row in rows:
+            self.assertLess(row["tracked_rms_error"], row["raw_rms_error"])
+        mean_tracked = sum(row["tracked_rms_error"] for row in rows) / len(rows)
+        mean_coarse = sum(row["coarse_rms_error"] for row in rows) / len(rows)
+        self.assertLess(mean_tracked, mean_coarse)
+
+
+if __name__ == "__main__":
+    unittest.main()
