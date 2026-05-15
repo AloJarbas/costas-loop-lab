@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 from pathlib import Path
 
-from .analysis import rms_decision_error, sweep_frequency_offsets
+from .analysis import rms_decision_error, sweep_acquisition_modes, sweep_frequency_offsets
 from .loop import run_qpsk_costas_loop
-from .render import render_costas_demo_svg, render_offset_sweep_svg
+from .render import export_png_from_svg, render_acquisition_range_svg, render_costas_demo_svg, render_offset_sweep_svg
 from .signal import qpsk_symbols, rotate_symbols
 
 
@@ -36,6 +37,20 @@ def main() -> None:
     sweep.add_argument("--beta", type=float, default=0.0045)
     sweep.add_argument("--output", type=Path, default=None)
 
+    acquisition = sub.add_parser("acquisition-sweep", help="compare phase-only acquisition against 4th-power frequency acquisition")
+    acquisition.add_argument("--min-offset", type=float, default=-0.75)
+    acquisition.add_argument("--max-offset", type=float, default=0.75)
+    acquisition.add_argument("--steps", type=int, default=31)
+    acquisition.add_argument("--count", type=int, default=900)
+    acquisition.add_argument("--seed", type=int, default=7)
+    acquisition.add_argument("--phase-offset", type=float, default=0.85)
+    acquisition.add_argument("--noise-std", type=float, default=0.04)
+    acquisition.add_argument("--alpha", type=float, default=0.11)
+    acquisition.add_argument("--beta", type=float, default=0.0045)
+    acquisition.add_argument("--coarse-prefix", type=int, default=64)
+    acquisition.add_argument("--output", type=Path, default=None)
+    acquisition.add_argument("--png-output", type=Path, default=None)
+
     args = parser.parse_args()
 
     if args.command == "demo":
@@ -59,6 +74,25 @@ def main() -> None:
             "final_freq_estimate": trace.freq_estimates[-1],
         }
         print(json.dumps(payload, indent=2))
+        return
+
+    if args.command == "acquisition-sweep":
+        offsets = [args.min_offset + idx * (args.max_offset - args.min_offset) / (args.steps - 1) for idx in range(args.steps)]
+        rows = sweep_acquisition_modes(
+            offsets,
+            count=args.count,
+            phase_offset=args.phase_offset,
+            noise_std=args.noise_std,
+            alpha=args.alpha,
+            beta=args.beta,
+            coarse_prefix=args.coarse_prefix,
+            seed=args.seed,
+        )
+        if args.output is not None:
+            render_acquisition_range_svg(rows, output=args.output)
+        if args.png_output is not None and args.output is not None:
+            export_png_from_svg(args.output, args.png_output)
+        print(json.dumps([asdict(row) for row in rows], indent=2))
         return
 
     offsets = [args.min_offset + idx * (args.max_offset - args.min_offset) / (args.steps - 1) for idx in range(args.steps)]

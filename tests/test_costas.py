@@ -3,8 +3,8 @@ from __future__ import annotations
 import cmath
 import unittest
 
-from costaslab.analysis import rms_decision_error, sweep_frequency_offsets
-from costaslab.loop import coarse_fourth_power_phase, run_qpsk_costas_loop
+from costaslab.analysis import quality_band, rms_decision_error, sweep_acquisition_modes, sweep_frequency_offsets
+from costaslab.loop import coarse_fourth_power_frequency, coarse_fourth_power_phase, run_qpsk_costas_loop
 from costaslab.signal import hard_decision_qpsk, qpsk_symbols, rotate_symbols
 
 
@@ -43,6 +43,25 @@ class CostasLoopTests(unittest.TestCase):
         mean_tracked = sum(row["tracked_rms_error"] for row in rows) / len(rows)
         mean_coarse = sum(row["coarse_rms_error"] for row in rows) / len(rows)
         self.assertLess(mean_tracked, mean_coarse)
+
+    def test_coarse_fourth_power_frequency_tracks_offset(self) -> None:
+        symbols = qpsk_symbols(256, seed=12)
+        rotated = rotate_symbols(symbols, phase_offset=0.25, freq_offset=0.06, noise_std=0.01, seed=13)
+        estimate = coarse_fourth_power_frequency(rotated[:128])
+        self.assertAlmostEqual(estimate, 0.06, delta=0.01)
+
+    def test_frequency_acquisition_extends_pull_in_range(self) -> None:
+        symbols = qpsk_symbols(900, seed=21)
+        received = rotate_symbols(symbols, phase_offset=0.85, freq_offset=0.50, noise_std=0.04, seed=22)
+        phase_only = run_qpsk_costas_loop(received, coarse_mode="phase")
+        freq_acquired = run_qpsk_costas_loop(received, coarse_mode="freq_phase")
+        self.assertLess(rms_decision_error(freq_acquired.tracked, trim=180), 0.65 * rms_decision_error(phase_only.tracked, trim=180))
+
+    def test_acquisition_sweep_shows_broader_clean_band(self) -> None:
+        rows = sweep_acquisition_modes([-0.5, -0.3, 0.0, 0.3, 0.5], count=900)
+        clean_phase = sum(1 for row in rows if quality_band(row.phase_only_tracked_rms_error) == "clean")
+        clean_freq = sum(1 for row in rows if quality_band(row.freq_acquired_tracked_rms_error) == "clean")
+        self.assertGreater(clean_freq, clean_phase)
 
 
 if __name__ == "__main__":

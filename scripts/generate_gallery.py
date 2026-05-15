@@ -7,9 +7,9 @@ import sys
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from costaslab.analysis import rms_decision_error, sweep_frequency_offsets
+from costaslab.analysis import quality_band, rms_decision_error, sweep_acquisition_modes, sweep_frequency_offsets
 from costaslab.loop import run_qpsk_costas_loop
-from costaslab.render import render_costas_demo_svg, render_offset_sweep_svg
+from costaslab.render import export_png_from_svg, render_acquisition_range_svg, render_costas_demo_svg, render_offset_sweep_svg
 from costaslab.signal import qpsk_symbols, rotate_symbols
 
 ASSETS = REPO / "assets"
@@ -24,9 +24,15 @@ def main() -> None:
     received = rotate_symbols(symbols, phase_offset=0.85, freq_offset=0.022, noise_std=0.04, seed=8)
     trace = run_qpsk_costas_loop(received, alpha=0.11, beta=0.0045)
     render_costas_demo_svg(trace, output=ASSETS / "qpsk-costas-demo.svg")
+    export_png_from_svg(ASSETS / "qpsk-costas-demo.svg", ASSETS / "qpsk-costas-demo.png")
 
     sweep_rows = sweep_frequency_offsets([(-0.5 + 0.05 * idx) for idx in range(21)])
     render_offset_sweep_svg(sweep_rows, output=ASSETS / "qpsk-costas-offset-sweep.svg")
+    export_png_from_svg(ASSETS / "qpsk-costas-offset-sweep.svg", ASSETS / "qpsk-costas-offset-sweep.png")
+
+    acquisition_rows = sweep_acquisition_modes([(-0.75 + 0.05 * idx) for idx in range(31)])
+    render_acquisition_range_svg(acquisition_rows, output=ASSETS / "qpsk-acquisition-range-map.svg")
+    export_png_from_svg(ASSETS / "qpsk-acquisition-range-map.svg", ASSETS / "qpsk-acquisition-range-map.png")
 
     lines = [
         "# QPSK carrier-recovery report",
@@ -59,6 +65,46 @@ def main() -> None:
         lines.append(f"- {row['freq_offset']:+.3f} rad/sample -> raw {row['raw_rms_error']:.3f}, coarse {row['coarse_rms_error']:.3f}, tracked {row['tracked_rms_error']:.3f}")
 
     (REPORTS / "qpsk-carrier-recovery.md").write_text("\n".join(lines) + "\n")
+
+    acquisition_lines = [
+        "# QPSK frequency acquisition report",
+        "",
+        "This pass adds a wider receive-chain split: a 4th-power front end now estimates both coarse phase and coarse frequency before the Costas loop takes over.",
+        "",
+        "## Why this matters",
+        "",
+        "Phase-only coarse correction can clean up a static rotation, but it leaves the loop to eat the whole residual frequency ramp by itself.",
+        "That is fine near the center. It is much less fine once the offset gets large enough that the loop is always chasing.",
+        "",
+        "The useful boundary here is roughly `|freq_offset| < pi/4`, because the 4th-power frequency estimate wraps beyond that alias limit.",
+        "",
+        "## Sweep summary",
+        "",
+    ]
+
+    clean_phase = [abs(row.freq_offset) for row in acquisition_rows if quality_band(row.phase_only_tracked_rms_error) == "clean"]
+    clean_freq = [abs(row.freq_offset) for row in acquisition_rows if quality_band(row.freq_acquired_tracked_rms_error) == "clean"]
+    marginal_freq = [abs(row.freq_offset) for row in acquisition_rows if quality_band(row.freq_acquired_tracked_rms_error) != "failed"]
+    acquisition_lines.append(f"- phase-only coarse + Costas stays clean to about ±{(max(clean_phase) if clean_phase else 0.0):.2f} rad/sample in this sweep")
+    acquisition_lines.append(f"- freq + phase coarse + Costas stays clean to about ±{(max(clean_freq) if clean_freq else 0.0):.2f} rad/sample")
+    acquisition_lines.append(f"- freq + phase coarse + Costas stays at least marginal to about ±{(max(marginal_freq) if marginal_freq else 0.0):.2f} rad/sample")
+    acquisition_lines.append("")
+    acquisition_lines.append("## Per-offset comparison")
+    acquisition_lines.append("")
+    for row in acquisition_rows:
+        acquisition_lines.append(
+            f"- {row.freq_offset:+.3f} rad/sample -> phase-only tracked {row.phase_only_tracked_rms_error:.3f}, freq-acquired tracked {row.freq_acquired_tracked_rms_error:.3f}, coarse freq estimate {row.coarse_frequency_estimate:+.4f}"
+        )
+
+    acquisition_lines.extend(
+        [
+            "",
+            "## Read the artifact",
+            "",
+            "Open `assets/qpsk-acquisition-range-map.svg` or the 300 dpi PNG next. The top plot shows the handoff improvement directly, the lower-left panel shows where the coarse estimate stays honest, and the regime bars make the pull-in range visible instead of leaving it as folklore.",
+        ]
+    )
+    (REPORTS / "qpsk-frequency-acquisition.md").write_text("\n".join(acquisition_lines) + "\n")
     print("generated Costas-loop gallery and report")
 
 
