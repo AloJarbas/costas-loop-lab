@@ -5,9 +5,15 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 
-from .analysis import rms_decision_error, sweep_acquisition_modes, sweep_frequency_offsets
+from .analysis import LoopGainSetting, rms_decision_error, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from .loop import run_qpsk_costas_loop
-from .render import export_png_from_svg, render_acquisition_range_svg, render_costas_demo_svg, render_offset_sweep_svg
+from .render import (
+    export_png_from_svg,
+    render_acquisition_range_svg,
+    render_costas_demo_svg,
+    render_loop_gain_tradeoff_svg,
+    render_offset_sweep_svg,
+)
 from .signal import qpsk_symbols, rotate_symbols
 
 
@@ -51,6 +57,18 @@ def main() -> None:
     acquisition.add_argument("--output", type=Path, default=None)
     acquisition.add_argument("--png-output", type=Path, default=None)
 
+    gain_study = sub.add_parser("gain-study", help="compare loop-gain settings on acquisition speed versus tracking jitter")
+    gain_study.add_argument("--count", type=int, default=1500)
+    gain_study.add_argument("--seed", type=int, default=7)
+    gain_study.add_argument("--phase-offset", type=float, default=0.85)
+    gain_study.add_argument("--acquisition-offset", type=float, default=0.35)
+    gain_study.add_argument("--acquisition-noise-std", type=float, default=0.04)
+    gain_study.add_argument("--tracking-offset", type=float, default=0.35)
+    gain_study.add_argument("--tracking-noise-std", type=float, default=0.08)
+    gain_study.add_argument("--coarse-prefix", type=int, default=64)
+    gain_study.add_argument("--output", type=Path, default=None)
+    gain_study.add_argument("--png-output", type=Path, default=None)
+
     args = parser.parse_args()
 
     if args.command == "demo":
@@ -93,6 +111,43 @@ def main() -> None:
         if args.png_output is not None and args.output is not None:
             export_png_from_svg(args.output, args.png_output)
         print(json.dumps([asdict(row) for row in rows], indent=2))
+        return
+
+    if args.command == "gain-study":
+        settings = [
+            LoopGainSetting(label="gentle", alpha=0.05, beta=0.0015),
+            LoopGainSetting(label="default", alpha=0.11, beta=0.0045),
+            LoopGainSetting(label="aggressive", alpha=0.20, beta=0.0120),
+        ]
+        studies = study_loop_gains(
+            settings,
+            count=args.count,
+            phase_offset=args.phase_offset,
+            acquisition_offset=args.acquisition_offset,
+            acquisition_noise_std=args.acquisition_noise_std,
+            tracking_offset=args.tracking_offset,
+            tracking_noise_std=args.tracking_noise_std,
+            coarse_prefix=args.coarse_prefix,
+            seed=args.seed,
+        )
+        if args.output is not None:
+            render_loop_gain_tradeoff_svg(studies, output=args.output)
+        if args.png_output is not None and args.output is not None:
+            export_png_from_svg(args.output, args.png_output)
+        payload = [
+            {
+                "label": study.label,
+                "alpha": study.alpha,
+                "beta": study.beta,
+                "acquisition_settle_index": study.acquisition_settle_index,
+                "acquisition_tail_rms_error": study.acquisition_tail_rms_error,
+                "tracking_tail_rms_error": study.tracking_tail_rms_error,
+                "tracking_mean_abs_costas_error": study.tracking_mean_abs_costas_error,
+                "tracking_freq_jitter": study.tracking_freq_jitter,
+            }
+            for study in studies
+        ]
+        print(json.dumps(payload, indent=2))
         return
 
     offsets = [args.min_offset + idx * (args.max_offset - args.min_offset) / (args.steps - 1) for idx in range(args.steps)]

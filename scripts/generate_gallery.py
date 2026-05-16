@@ -7,9 +7,9 @@ import sys
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from costaslab.analysis import quality_band, rms_decision_error, sweep_acquisition_modes, sweep_frequency_offsets
+from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from costaslab.loop import run_qpsk_costas_loop
-from costaslab.render import export_png_from_svg, render_acquisition_range_svg, render_costas_demo_svg, render_offset_sweep_svg
+from costaslab.render import export_png_from_svg, render_acquisition_range_svg, render_costas_demo_svg, render_loop_gain_tradeoff_svg, render_offset_sweep_svg
 from costaslab.signal import qpsk_symbols, rotate_symbols
 
 ASSETS = REPO / "assets"
@@ -33,6 +33,15 @@ def main() -> None:
     acquisition_rows = sweep_acquisition_modes([(-0.75 + 0.05 * idx) for idx in range(31)])
     render_acquisition_range_svg(acquisition_rows, output=ASSETS / "qpsk-acquisition-range-map.svg")
     export_png_from_svg(ASSETS / "qpsk-acquisition-range-map.svg", ASSETS / "qpsk-acquisition-range-map.png")
+
+    gain_settings = [
+        LoopGainSetting(label="gentle", alpha=0.05, beta=0.0015),
+        LoopGainSetting(label="default", alpha=0.11, beta=0.0045),
+        LoopGainSetting(label="aggressive", alpha=0.20, beta=0.0120),
+    ]
+    gain_studies = study_loop_gains(gain_settings)
+    render_loop_gain_tradeoff_svg(gain_studies, output=ASSETS / "qpsk-loop-gain-tradeoffs.svg")
+    export_png_from_svg(ASSETS / "qpsk-loop-gain-tradeoffs.svg", ASSETS / "qpsk-loop-gain-tradeoffs.png")
 
     lines = [
         "# QPSK carrier-recovery report",
@@ -105,6 +114,40 @@ def main() -> None:
         ]
     )
     (REPORTS / "qpsk-frequency-acquisition.md").write_text("\n".join(acquisition_lines) + "\n")
+
+    gain_lines = [
+        "# QPSK loop-gain tradeoff report",
+        "",
+        "This pass keeps the same coarse acquisition logic but changes the Costas loop gains to show the real compromise: hotter gains can pull a rough handoff into place faster, but they leave a noisier residual once the front end has already done its job.",
+        "",
+        "## Stress cases",
+        "",
+        "- acquisition panel: phase-only coarse correction, `freq_offset = +0.35 rad/sample`, `noise_std = 0.04`",
+        "- tracking panel: frequency-plus-phase coarse correction, `freq_offset = +0.35 rad/sample`, `noise_std = 0.08`",
+        "",
+        "## Loop settings",
+        "",
+    ]
+    for study in gain_studies:
+        settle_text = str(study.acquisition_settle_index) if study.acquisition_settle_index is not None else "no clean settle in 1500 symbols"
+        gain_lines.append(
+            f"- **{study.label}** (`alpha={study.alpha:.2f}`, `beta={study.beta:.4f}`): phase-only settle = {settle_text}; tracking tail RMS = {study.tracking_tail_rms_error:.3f}; mean |Costas error| = {study.tracking_mean_abs_costas_error:.3f}; frequency jitter = {study.tracking_freq_jitter * 1000.0:.2f} mrad/sample"
+        )
+
+    gain_lines.extend(
+        [
+            "",
+            "## Read the result",
+            "",
+            "The figure splits the problem into two honest regimes instead of pretending one gain setting is simply better:",
+            "",
+            "- on the harder phase-only handoff, aggressive gains reach the decision-directed sweet spot much sooner",
+            "- once the coarse frequency estimate has already done that work, gentler gains leave a quieter steady-state trace",
+            "",
+            "That is the real tuning trade: rescue margin versus post-lock calm.",
+        ]
+    )
+    (REPORTS / "qpsk-loop-gain-tradeoffs.md").write_text("\n".join(gain_lines) + "\n")
     print("generated Costas-loop gallery and report")
 
 

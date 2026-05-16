@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .analysis import AcquisitionSweepRow, quality_band, sweep_frequency_offsets
+from .analysis import AcquisitionSweepRow, LoopGainStudy, decision_error_series, moving_average, quality_band, sweep_frequency_offsets
 from .loop import LoopTrace
 
 
@@ -337,6 +337,171 @@ def render_acquisition_range_svg(
     parts.append(_text(band_left + 24, band_bottom - 48, "green = clean", size=13, fill="#10b981", weight="700"))
     parts.append(_text(band_left + 146, band_bottom - 48, "amber = marginal", size=13, fill="#f59e0b", weight="700"))
     parts.append(_text(band_left + 304, band_bottom - 48, "red = failed", size=13, fill="#ef4444", weight="700"))
+
+    parts.append('</svg>')
+    output.write_text("\n".join(parts) + "\n")
+
+
+def render_loop_gain_tradeoff_svg(
+    studies: list[LoopGainStudy],
+    *,
+    output: str | Path,
+    title: str = "Costas loop gain tradeoff: faster pull-in costs steady-state calm",
+) -> None:
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    width = 1600
+    height = 980
+    top_left, top_right = 80.0, 1520.0
+    top_top, top_bottom = 118.0, 470.0
+    lower_left, lower_right = 80.0, 780.0
+    lower_top, lower_bottom = 560.0, 900.0
+    summary_left, summary_right = 860.0, 1520.0
+    summary_top, summary_bottom = 560.0, 900.0
+
+    fallback = ["#0f766e", "#2563eb", "#dc2626", "#a855f7"]
+    colors: dict[str, str] = {}
+    for idx, study in enumerate(studies):
+        colors.setdefault(study.label, fallback[idx % len(fallback)])
+
+    top_series = {
+        study.label: moving_average(decision_error_series(study.acquisition_trace.tracked), 24)
+        for study in studies
+    }
+    top_y_lo = 0.0
+    top_y_hi = max(max(values) for values in top_series.values()) * 1.08
+    tail_len = min(260, min(len(study.tracking_trace.freq_estimates) for study in studies))
+    lower_series = {study.label: study.tracking_trace.freq_estimates[-tail_len:] for study in studies}
+    lower_y_extent = max(abs(value) for values in lower_series.values() for value in values) * 1000.0
+    lower_y_extent = max(lower_y_extent, 1.0)
+
+    def map_top_x(idx: int, count: int) -> float:
+        return top_left + 56 + idx / max(count - 1, 1) * ((top_right - 24) - (top_left + 56))
+
+    def map_top_y(value: float) -> float:
+        return top_bottom - 26 - (value - top_y_lo) / (top_y_hi - top_y_lo) * ((top_bottom - 26) - (top_top + 36))
+
+    def map_lower_x(idx: int, count: int) -> float:
+        return lower_left + 56 + idx / max(count - 1, 1) * ((lower_right - 24) - (lower_left + 56))
+
+    def map_lower_y(value: float) -> float:
+        milli = value * 1000.0
+        return lower_bottom - 26 - ((milli + lower_y_extent) / (2.0 * lower_y_extent)) * ((lower_bottom - 26) - (lower_top + 36))
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">',
+        '<rect width="100%" height="100%" fill="#f8fafc"/>',
+        _text(width / 2, 42, title, size=28, anchor="middle", weight="700"),
+        _paragraph(
+            width / 2,
+            68,
+            [
+                "A gentler loop is calmer after lock. A hotter loop gets there faster if the coarse handoff is rough.",
+                "The front end stays fixed here. Only the loop gains change.",
+            ],
+            size=16,
+            anchor="middle",
+            fill="#475569",
+            line_height=18,
+        ),
+    ]
+
+    # Top panel: acquisition speed in a phase-only stress case.
+    parts.append(f'<rect x="{top_left:.1f}" y="{top_top:.1f}" width="{top_right - top_left:.1f}" height="{top_bottom - top_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(top_left + 18, top_top + 28, "Phase-only coarse acquisition under a harder residual ramp", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(top_left + 18, top_top + 52, ["carrier offset = +0.35 rad/sample, noise std = 0.04", "24-symbol moving average of decision error after coarse phase only"], size=14, fill="#526274", line_height=17))
+    for step in range(7):
+        frac = step / 6
+        y = top_top + 36 + frac * ((top_bottom - 26) - (top_top + 36))
+        value = top_y_hi - frac * (top_y_hi - top_y_lo)
+        parts.append(_line(top_left + 56, y, top_right - 24, y, stroke="#e2e8f0", dash="4 6"))
+        parts.append(_text(top_left + 48, y + 5, f"{value:.1f}", anchor="end", size=13, fill="#64748b"))
+    count = len(next(iter(top_series.values())))
+    for step in range(9):
+        frac = step / 8
+        x = top_left + 56 + frac * ((top_right - 24) - (top_left + 56))
+        value = frac * (count - 1)
+        parts.append(_line(x, top_top + 36, x, top_bottom - 26, stroke="#eef2f7", dash="4 6"))
+        parts.append(_text(x, top_bottom + 24, f"{int(round(value))}", anchor="middle", size=13, fill="#64748b"))
+    parts.append(_line(top_left + 56, top_top + 36, top_left + 56, top_bottom - 26, stroke="#334155", width=2))
+    parts.append(_line(top_left + 56, top_bottom - 26, top_right - 24, top_bottom - 26, stroke="#334155", width=2))
+    for study in studies:
+        series = top_series[study.label]
+        payload = " ".join(f"{map_top_x(idx, len(series)):.1f},{map_top_y(value):.1f}" for idx, value in enumerate(series))
+        parts.append(f'<polyline fill="none" stroke="{colors[study.label]}" stroke-width="3.0" points="{payload}"/>')
+        if study.acquisition_settle_index is not None:
+            settle_x = map_top_x(study.acquisition_settle_index, len(series))
+            parts.append(_line(settle_x, top_top + 36, settle_x, top_bottom - 26, stroke=colors[study.label], width=2.0, dash="8 6"))
+            parts.append(_text(settle_x + 6, top_top + 100 + 22 * list(top_series).index(study.label), f"{study.label}: settles ~{study.acquisition_settle_index}", size=13, fill=colors[study.label], weight="700"))
+        else:
+            parts.append(_text(top_right - 300, top_top + 126 + 22 * list(top_series).index(study.label), f"{study.label}: no clean settle in window", size=13, fill=colors[study.label], weight="700"))
+    parts.append(_text((top_left + top_right) / 2, top_bottom + 54, "symbol index", anchor="middle", size=16, fill="#374151"))
+    parts.append(_text(28, (top_top + top_bottom) / 2, "decision error", anchor="middle", size=16, fill="#374151", transform=f'rotate(-90 28 {(top_top + top_bottom) / 2:.1f})'))
+
+    legend_x = top_right - 282
+    legend_y = top_top + 28
+    parts.append(f'<rect x="{legend_x:.1f}" y="{legend_y:.1f}" width="250" height="92" rx="14" fill="#ffffff" stroke="#e2e8f0"/>')
+    for idx, study in enumerate(studies):
+        y = legend_y + 24 + idx * 22
+        parts.append(_line(legend_x + 16, y - 5, legend_x + 44, y - 5, stroke=colors[study.label], width=4))
+        parts.append(_text(legend_x + 56, y, f"{study.label}  α={study.alpha:.2f} β={study.beta:.4f}", size=13, fill="#334155", weight="700"))
+
+    # Lower-left panel: tracking jitter after freq+phase acquisition.
+    parts.append(f'<rect x="{lower_left:.1f}" y="{lower_top:.1f}" width="{lower_right - lower_left:.1f}" height="{lower_bottom - lower_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(lower_left + 18, lower_top + 28, "Tracking-mode frequency jitter after coarse frequency help", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(lower_left + 18, lower_top + 52, ["carrier offset = +0.35 rad/sample, noise std = 0.08", "the coarse front end already landed near lock; now the loop just has to stay quiet"], size=14, fill="#526274", line_height=17))
+    for step in range(7):
+        frac = step / 6
+        y = lower_top + 36 + frac * ((lower_bottom - 26) - (lower_top + 36))
+        value = lower_y_extent - frac * (2.0 * lower_y_extent)
+        parts.append(_line(lower_left + 56, y, lower_right - 24, y, stroke="#e2e8f0", dash="4 6"))
+        parts.append(_text(lower_left + 48, y + 5, f"{value:+.1f}", anchor="end", size=13, fill="#64748b"))
+    for step in range(6):
+        frac = step / 5
+        x = lower_left + 56 + frac * ((lower_right - 24) - (lower_left + 56))
+        value = int(round(frac * (tail_len - 1)))
+        parts.append(_line(x, lower_top + 36, x, lower_bottom - 26, stroke="#eef2f7", dash="4 6"))
+        parts.append(_text(x, lower_bottom + 24, f"{value}", anchor="middle", size=13, fill="#64748b"))
+    parts.append(_line(lower_left + 56, lower_top + 36, lower_left + 56, lower_bottom - 26, stroke="#334155", width=2))
+    parts.append(_line(lower_left + 56, lower_bottom - 26, lower_right - 24, lower_bottom - 26, stroke="#334155", width=2))
+    parts.append(_line(lower_left + 56, map_lower_y(0.0), lower_right - 24, map_lower_y(0.0), stroke="#94a3b8", width=1.8, dash="8 8"))
+    for study in studies:
+        series = lower_series[study.label]
+        payload = " ".join(f"{map_lower_x(idx, len(series)):.1f},{map_lower_y(value):.1f}" for idx, value in enumerate(series))
+        parts.append(f'<polyline fill="none" stroke="{colors[study.label]}" stroke-width="2.6" points="{payload}"/>')
+    parts.append(_text((lower_left + lower_right) / 2, lower_bottom + 54, "symbol index within the last 260-symbol window", anchor="middle", size=16, fill="#374151"))
+    parts.append(_text(28, (lower_top + lower_bottom) / 2, "freq estimate residual (mrad/sample)", anchor="middle", size=16, fill="#374151", transform=f'rotate(-90 28 {(lower_top + lower_bottom) / 2:.1f})'))
+
+    # Summary panel: settle time and jitter bars.
+    parts.append(f'<rect x="{summary_left:.1f}" y="{summary_top:.1f}" width="{summary_right - summary_left:.1f}" height="{summary_bottom - summary_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(summary_left + 18, summary_top + 28, "Speed versus calm, side by side", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(summary_left + 18, summary_top + 52, ["left bars: phase-only settle time in the harder case", "right bars: tracking jitter after freq+phase acquisition"], size=14, fill="#526274", line_height=17))
+
+    settle_max = max((study.acquisition_settle_index or 1500) for study in studies)
+    jitter_max = max(study.tracking_freq_jitter for study in studies) * 1000.0 * 1.1
+    row_top = summary_top + 114
+    row_gap = 72
+    for idx, study in enumerate(studies):
+        y = row_top + idx * row_gap
+        parts.append(_text(summary_left + 18, y + 6, study.label, size=14, fill=colors[study.label], weight="700"))
+        settle_value = float(study.acquisition_settle_index if study.acquisition_settle_index is not None else settle_max)
+        settle_w = 152.0 * settle_value / max(settle_max, 1.0)
+        jitter_value = study.tracking_freq_jitter * 1000.0
+        jitter_w = 148.0 * jitter_value / max(jitter_max, 1e-9)
+        parts.append(f'<rect x="{summary_left + 120:.1f}" y="{y - 12:.1f}" width="152.0" height="18" rx="9" fill="#e2e8f0"/>')
+        parts.append(f'<rect x="{summary_left + 120:.1f}" y="{y - 12:.1f}" width="{settle_w:.1f}" height="18" rx="9" fill="{colors[study.label]}" fill-opacity="0.85"/>')
+        settle_label = f"{study.acquisition_settle_index} sym" if study.acquisition_settle_index is not None else "no settle"
+        parts.append(_text(summary_left + 282, y + 2, settle_label, size=13, fill="#334155", weight="700"))
+
+        parts.append(f'<rect x="{summary_left + 346:.1f}" y="{y - 12:.1f}" width="148.0" height="18" rx="9" fill="#e2e8f0"/>')
+        parts.append(f'<rect x="{summary_left + 346:.1f}" y="{y - 12:.1f}" width="{jitter_w:.1f}" height="18" rx="9" fill="{colors[study.label]}" fill-opacity="0.55"/>')
+        parts.append(_text(summary_left + 558, y + 2, f"{jitter_value:.2f} mrad/sample", size=12, anchor="end", fill="#334155", weight="700"))
+        parts.append(_text(summary_left + 346, y + 24, f"tail RMS {study.tracking_tail_rms_error:.3f} · |Costas err| {study.tracking_mean_abs_costas_error:.3f}", size=12, fill="#64748b"))
+
+    parts.append(_text(summary_left + 196, summary_bottom - 30, "settle time", anchor="middle", size=14, fill="#374151", weight="700"))
+    parts.append(_text(summary_left + 420, summary_bottom - 30, "frequency jitter", anchor="middle", size=14, fill="#374151", weight="700"))
+    parts.append(_paragraph(summary_left + 18, summary_bottom - 86, ["No single loop gain wins everywhere.", "Rough handoffs reward aggression.", "Good handoffs reward calm."], size=12, fill="#475569", line_height=15))
 
     parts.append('</svg>')
     output.write_text("\n".join(parts) + "\n")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import cmath
 import unittest
 
-from costaslab.analysis import quality_band, rms_decision_error, sweep_acquisition_modes, sweep_frequency_offsets
+from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from costaslab.loop import coarse_fourth_power_frequency, coarse_fourth_power_phase, run_qpsk_costas_loop
 from costaslab.signal import hard_decision_qpsk, qpsk_symbols, rotate_symbols
 
@@ -62,6 +62,22 @@ class CostasLoopTests(unittest.TestCase):
         clean_phase = sum(1 for row in rows if quality_band(row.phase_only_tracked_rms_error) == "clean")
         clean_freq = sum(1 for row in rows if quality_band(row.freq_acquired_tracked_rms_error) == "clean")
         self.assertGreater(clean_freq, clean_phase)
+
+    def test_loop_gain_tradeoff_shows_speed_versus_jitter(self) -> None:
+        studies = study_loop_gains(
+            [
+                LoopGainSetting(label="gentle", alpha=0.05, beta=0.0015),
+                LoopGainSetting(label="default", alpha=0.11, beta=0.0045),
+                LoopGainSetting(label="aggressive", alpha=0.20, beta=0.0120),
+            ]
+        )
+        by_label = {study.label: study for study in studies}
+
+        self.assertIsNone(by_label["gentle"].acquisition_settle_index)
+        self.assertLess(by_label["aggressive"].acquisition_settle_index, by_label["default"].acquisition_settle_index)
+        self.assertLess(by_label["gentle"].tracking_freq_jitter, by_label["default"].tracking_freq_jitter)
+        self.assertLess(by_label["default"].tracking_freq_jitter, by_label["aggressive"].tracking_freq_jitter)
+        self.assertLess(by_label["gentle"].tracking_tail_rms_error, by_label["aggressive"].tracking_tail_rms_error)
 
 
 if __name__ == "__main__":
