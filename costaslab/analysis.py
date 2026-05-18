@@ -39,6 +39,15 @@ class LoopGainStudy:
     tracking_freq_jitter: float
 
 
+@dataclass(frozen=True)
+class CoarsePrefixBudgetRow:
+    coarse_prefix: int
+    noise_std: float
+    mean_abs_coarse_frequency_error: float
+    mean_coarse_rms_error: float
+    mean_tracked_rms_error: float
+
+
 def quality_band(rms_error: float) -> str:
     if rms_error < 0.10:
         return "clean"
@@ -223,3 +232,63 @@ def study_loop_gains(
             )
         )
     return studies
+
+
+def study_coarse_prefix_budget(
+    prefixes: list[int],
+    noise_levels: list[float],
+    *,
+    freq_offset: float = 0.62,
+    count: int = 900,
+    phase_offset: float = 0.85,
+    alpha: float = 0.11,
+    beta: float = 0.0045,
+    trim: int = 180,
+    trials: int = 24,
+    base_seed: int = 41,
+) -> list[CoarsePrefixBudgetRow]:
+    if not prefixes:
+        raise ValueError("prefixes must not be empty")
+    if not noise_levels:
+        raise ValueError("noise_levels must not be empty")
+    if trials < 1:
+        raise ValueError("trials must be at least 1")
+
+    rows: list[CoarsePrefixBudgetRow] = []
+    for noise_std in noise_levels:
+        for coarse_prefix in prefixes:
+            freq_errors: list[float] = []
+            coarse_rms_errors: list[float] = []
+            tracked_rms_errors: list[float] = []
+            for trial in range(trials):
+                symbol_seed = base_seed + 17 * trial
+                channel_seed = base_seed + 1000 + 29 * trial
+                symbols = qpsk_symbols(count, seed=symbol_seed)
+                received = rotate_symbols(
+                    symbols,
+                    phase_offset=phase_offset,
+                    freq_offset=freq_offset,
+                    noise_std=noise_std,
+                    seed=channel_seed,
+                )
+                trace = run_qpsk_costas_loop(
+                    received,
+                    alpha=alpha,
+                    beta=beta,
+                    coarse_prefix=coarse_prefix,
+                    coarse_mode="freq_phase",
+                )
+                freq_errors.append(abs(trace.coarse_frequency - freq_offset))
+                coarse_rms_errors.append(rms_decision_error(trace.coarse_corrected, trim=trim))
+                tracked_rms_errors.append(rms_decision_error(trace.tracked, trim=trim))
+
+            rows.append(
+                CoarsePrefixBudgetRow(
+                    coarse_prefix=coarse_prefix,
+                    noise_std=noise_std,
+                    mean_abs_coarse_frequency_error=sum(freq_errors) / len(freq_errors),
+                    mean_coarse_rms_error=sum(coarse_rms_errors) / len(coarse_rms_errors),
+                    mean_tracked_rms_error=sum(tracked_rms_errors) / len(tracked_rms_errors),
+                )
+            )
+    return rows

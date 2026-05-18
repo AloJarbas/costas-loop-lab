@@ -5,13 +5,14 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 
-from .analysis import LoopGainSetting, rms_decision_error, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
+from .analysis import LoopGainSetting, rms_decision_error, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from .loop import run_qpsk_costas_loop
 from .render import (
     export_png_from_svg,
     render_acquisition_range_svg,
     render_costas_demo_svg,
     render_loop_gain_tradeoff_svg,
+    render_coarse_prefix_budget_svg,
     render_offset_sweep_svg,
 )
 from .signal import qpsk_symbols, rotate_symbols
@@ -68,6 +69,20 @@ def main() -> None:
     gain_study.add_argument("--coarse-prefix", type=int, default=64)
     gain_study.add_argument("--output", type=Path, default=None)
     gain_study.add_argument("--png-output", type=Path, default=None)
+
+    prefix_study = sub.add_parser("prefix-budget-study", help="measure how coarse-prefix length changes front-end honesty versus post-loop output")
+    prefix_study.add_argument("--prefixes", type=str, default="8,12,16,24,32,48,64,96,128")
+    prefix_study.add_argument("--noise-levels", type=str, default="0.02,0.04,0.06,0.08,0.10")
+    prefix_study.add_argument("--freq-offset", type=float, default=0.62)
+    prefix_study.add_argument("--count", type=int, default=900)
+    prefix_study.add_argument("--phase-offset", type=float, default=0.85)
+    prefix_study.add_argument("--alpha", type=float, default=0.11)
+    prefix_study.add_argument("--beta", type=float, default=0.0045)
+    prefix_study.add_argument("--trim", type=int, default=180)
+    prefix_study.add_argument("--trials", type=int, default=24)
+    prefix_study.add_argument("--base-seed", type=int, default=41)
+    prefix_study.add_argument("--output", type=Path, default=None)
+    prefix_study.add_argument("--png-output", type=Path, default=None)
 
     args = parser.parse_args()
 
@@ -147,6 +162,29 @@ def main() -> None:
             }
             for study in studies
         ]
+        print(json.dumps(payload, indent=2))
+        return
+
+    if args.command == "prefix-budget-study":
+        prefixes = [int(chunk) for chunk in args.prefixes.split(",") if chunk.strip()]
+        noise_levels = [float(chunk) for chunk in args.noise_levels.split(",") if chunk.strip()]
+        rows = study_coarse_prefix_budget(
+            prefixes,
+            noise_levels,
+            freq_offset=args.freq_offset,
+            count=args.count,
+            phase_offset=args.phase_offset,
+            alpha=args.alpha,
+            beta=args.beta,
+            trim=args.trim,
+            trials=args.trials,
+            base_seed=args.base_seed,
+        )
+        if args.output is not None:
+            render_coarse_prefix_budget_svg(rows, output=args.output)
+        if args.png_output is not None and args.output is not None:
+            export_png_from_svg(args.output, args.png_output)
+        payload = [asdict(row) for row in rows]
         print(json.dumps(payload, indent=2))
         return
 

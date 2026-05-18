@@ -11,7 +11,7 @@ Not a full modem. Not a grab bag of SDR buzzwords. Just the carrier-recovery par
 - coarse 4th-power phase estimate for QPSK, with the expected quadrant ambiguity
 - coarse 4th-power frequency estimate so the front end can remove a real carrier ramp before the loop takes over
 - Costas-loop tracker with recorded phase and frequency traces
-- generated figures for the baseline demo, the original offset sweep, the acquisition-range map that compares phase-only correction against phase-plus-frequency acquisition, and a new loop-gain tradeoff study that makes pull-in speed fight steady-state calm in one view
+- generated figures for the baseline demo, the original offset sweep, the acquisition-range map that compares phase-only correction against phase-plus-frequency acquisition, a loop-gain tradeoff study that makes pull-in speed fight steady-state calm in one view, and a new coarse-prefix budget card that shows when front-end sample count still matters and when the loop has already stopped caring
 - a companion notebook and small tests that check the acquisition chain actually helps
 
 ## Gallery
@@ -36,6 +36,12 @@ This is the new spine of the repo. It shows the actual handoff: phase-only coars
 
 This follow-up pass answers a different question: once the front end is fixed, how hard should the loop push? The figure separates two regimes instead of mushing them together: on a rough phase-only handoff, hotter gains pull in faster; once coarse frequency help already landed near lock, gentler gains leave a quieter residual.
 
+### Coarse-prefix budget card
+
+![Coarse-prefix budget card](assets/qpsk-coarse-prefix-budget.png)
+
+This new sidecar answers a narrower front-end question. More prefix symbols keep making the 4th-power frequency estimate cleaner, but the tracked RMS flattens much sooner once the handoff is already inside the loop's comfort zone. In this model, longer prefixes mostly buy estimator honesty before they buy visible post-lock improvement.
+
 ## Why this repo is worth opening
 
 Carrier recovery often gets explained as if one loop does everything.
@@ -48,7 +54,7 @@ The useful version is narrower:
 - a Costas loop keeps it from drifting away again.
 
 This repo opens with that split made explicit.
-It now ships code, figures, a notebook, a range map that shows exactly when the front end has done enough work for the loop to finish the job, and a gain-tradeoff pass that shows why tuning still matters after acquisition is already in place.
+It now ships code, figures, notebooks, a range map that shows exactly when the front end has done enough work for the loop to finish the job, a gain-tradeoff pass that shows why tuning still matters after acquisition is already in place, and a coarse-prefix budget card that shows when adding more front-end symbols mostly stops changing the loop output.
 
 ## Quick start
 
@@ -88,19 +94,27 @@ Compare gentle, default, and aggressive loop gains under one acquisition stress 
 python3 -m costaslab.cli gain-study --output assets/qpsk-loop-gain-tradeoffs.svg --png-output assets/qpsk-loop-gain-tradeoffs.png
 ```
 
+Measure how coarse-prefix length changes the 4th-power estimate and the post-loop output:
+
+```bash
+python3 -m costaslab.cli prefix-budget-study --output assets/qpsk-coarse-prefix-budget.svg --png-output assets/qpsk-coarse-prefix-budget.png
+```
+
 ## Repo layout
 
 - `costaslab/signal.py`: QPSK source and channel rotation
 - `costaslab/loop.py`: coarse phase and coarse frequency estimates plus the Costas tracking loop
-- `costaslab/analysis.py`: RMS decision-error metrics, offset sweeps, acquisition-mode comparisons, and loop-gain studies
+- `costaslab/analysis.py`: RMS decision-error metrics, offset sweeps, acquisition-mode comparisons, loop-gain studies, and the coarse-prefix budget sweep
 - `costaslab/render.py`: SVG figure generation plus PNG export helper for GitHub previews
-- `costaslab/cli.py`: demo, sweep, acquisition-sweep, and gain-study commands
+- `costaslab/cli.py`: demo, sweep, acquisition-sweep, gain-study, and prefix-budget-study commands
 - `scripts/generate_gallery.py`: reproducible asset build
 - `reports/qpsk-carrier-recovery.md`: generated baseline summary for the original figures
 - `reports/qpsk-frequency-acquisition.md`: generated summary for the new acquisition-range pass
 - `reports/qpsk-loop-gain-tradeoffs.md`: generated summary for the speed-versus-jitter pass
+- `reports/qpsk-coarse-prefix-budget.md`: generated summary for the new front-end budget pass
 - `notebooks/frequency_acquisition_and_pull_in.ipynb`: slower technical walkthrough with equations, caveats, and problems
-- `tests/test_costas.py`: verification layer for phase estimation, frequency estimation, pull-in improvements, and the new gain tradeoff
+- `notebooks/coarse_prefix_budget.ipynb`: notebook companion for the new front-end budget card
+- `tests/test_costas.py`: verification layer for phase estimation, frequency estimation, pull-in improvements, loop-gain tradeoffs, and the new coarse-prefix study
 
 ## Scope boundary
 
@@ -111,7 +125,7 @@ No live-emission procedures, no hardware control, no giant SDR framework.
 
 - add one sidecar note on why decision-directed tracking alone is fragile when the slicer is still wrong
 - add one bounded note on what breaks once the offset crosses the `\pi/4` alias limit of the 4th-power estimate
-- sweep one or two coarse-prefix lengths so the repo can show how much work the front end has to do before gain tuning even becomes the main question
+- compare coarse-prefix budget against loop-gain tuning in one shared card so the repo can show exactly when front-end quality matters more than gain polish
 
 That is enough for this repo to open as a real lab instead of a single neat picture.
 

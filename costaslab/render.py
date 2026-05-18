@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .analysis import AcquisitionSweepRow, LoopGainStudy, decision_error_series, moving_average, quality_band, sweep_frequency_offsets
+from .analysis import CoarsePrefixBudgetRow, AcquisitionSweepRow, LoopGainStudy, decision_error_series, moving_average, quality_band, sweep_frequency_offsets
 from .loop import LoopTrace
 
 
@@ -359,6 +359,10 @@ def render_loop_gain_tradeoff_svg(
     lower_top, lower_bottom = 560.0, 900.0
     summary_left, summary_right = 860.0, 1520.0
     summary_top, summary_bottom = 560.0, 900.0
+    top_plot_top = top_top + 86.0
+    top_plot_bottom = top_bottom - 26.0
+    lower_plot_top = lower_top + 86.0
+    lower_plot_bottom = lower_bottom - 26.0
 
     fallback = ["#0f766e", "#2563eb", "#dc2626", "#a855f7"]
     colors: dict[str, str] = {}
@@ -502,6 +506,172 @@ def render_loop_gain_tradeoff_svg(
     parts.append(_text(summary_left + 196, summary_bottom - 30, "settle time", anchor="middle", size=14, fill="#374151", weight="700"))
     parts.append(_text(summary_left + 420, summary_bottom - 30, "frequency jitter", anchor="middle", size=14, fill="#374151", weight="700"))
     parts.append(_paragraph(summary_left + 18, summary_bottom - 86, ["No single loop gain wins everywhere.", "Rough handoffs reward aggression.", "Good handoffs reward calm."], size=12, fill="#475569", line_height=15))
+
+    parts.append('</svg>')
+    output.write_text("\n".join(parts) + "\n")
+
+
+def render_coarse_prefix_budget_svg(
+    rows: list[CoarsePrefixBudgetRow],
+    *,
+    output: str | Path,
+    title: str = "QPSK coarse-prefix budget: when the loop stops caring",
+) -> None:
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        raise ValueError("rows must not be empty")
+
+    width = 1660
+    height = 1020
+    top_left, top_right = 80.0, 1520.0
+    top_top, top_bottom = 118.0, 456.0
+    lower_left, lower_right = 80.0, 900.0
+    lower_top, lower_bottom = 560.0, 900.0
+    summary_left, summary_right = 940.0, 1520.0
+    summary_top, summary_bottom = 560.0, 900.0
+    top_plot_top = top_top + 86.0
+    top_plot_bottom = top_bottom - 26.0
+    lower_plot_top = lower_top + 86.0
+    lower_plot_bottom = lower_bottom - 26.0
+
+    prefixes = sorted({row.coarse_prefix for row in rows})
+    noises = sorted({row.noise_std for row in rows})
+    rows_by_noise = {
+        noise: sorted((row for row in rows if row.noise_std == noise), key=lambda row: row.coarse_prefix)
+        for noise in noises
+    }
+
+    palette = ["#0f766e", "#2563eb", "#7c3aed", "#ea580c", "#dc2626", "#0891b2"]
+    colors = {noise: palette[idx % len(palette)] for idx, noise in enumerate(noises)}
+
+    top_y_hi = max(row.mean_abs_coarse_frequency_error for row in rows) * 1000.0 * 1.08
+    lower_y_lo = 0.0
+    lower_y_hi = max(row.mean_tracked_rms_error for row in rows) * 1.12
+
+    def map_x(prefix: int, left: float, right: float) -> float:
+        idx = prefixes.index(prefix)
+        return left + idx / max(len(prefixes) - 1, 1) * (right - left)
+
+    def map_top_y(value: float) -> float:
+        milli = value * 1000.0
+        return top_plot_bottom - (milli / max(top_y_hi, 1e-9)) * (top_plot_bottom - top_plot_top)
+
+    def map_lower_y(value: float) -> float:
+        return lower_plot_bottom - ((value - lower_y_lo) / max(lower_y_hi - lower_y_lo, 1e-9)) * (lower_plot_bottom - lower_plot_top)
+
+    def threshold_prefix(noise: float, *, target_milli: float) -> int | None:
+        for row in rows_by_noise[noise]:
+            if row.mean_abs_coarse_frequency_error * 1000.0 <= target_milli:
+                return row.coarse_prefix
+        return None
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">',
+        '<rect width="100%" height="100%" fill="#f8fafc"/>',
+        _text(width / 2, 42, title, size=28, anchor="middle", weight="700"),
+        _paragraph(
+            width / 2,
+            68,
+            [
+                "Same outer-band carrier offset, same loop gains, same symbol-rate model.",
+                "Only the front-end sample budget changes, and the post-lock output flattens early.",
+            ],
+            size=16,
+            anchor="middle",
+            fill="#475569",
+            line_height=18,
+        ),
+    ]
+
+    # Top panel.
+    parts.append(f'<rect x="{top_left:.1f}" y="{top_top:.1f}" width="{top_right - top_left:.1f}" height="{top_bottom - top_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(top_left + 18, top_top + 28, "Mean absolute coarse-frequency error at +0.62 rad/sample", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(top_left + 18, top_top + 52, ["24 Monte Carlo trials per point", "lower is better; units are mrad/sample"], size=14, fill="#526274", line_height=16))
+    for step in range(7):
+        frac = step / 6
+        y = top_plot_top + frac * (top_plot_bottom - top_plot_top)
+        value = top_y_hi - frac * top_y_hi
+        parts.append(_line(top_left + 56, y, top_right - 24, y, stroke="#e2e8f0", dash="4 6"))
+        parts.append(_text(top_left + 48, y + 5, f"{value:.1f}", anchor="end", size=13, fill="#64748b"))
+    for prefix in prefixes:
+        x = map_x(prefix, top_left + 56, top_right - 24)
+        parts.append(_line(x, top_plot_top, x, top_plot_bottom, stroke="#eef2f7", dash="4 6"))
+        parts.append(_text(x, top_bottom + 24, str(prefix), anchor="middle", size=13, fill="#64748b"))
+    parts.append(_line(top_left + 56, top_plot_top, top_left + 56, top_plot_bottom, stroke="#334155", width=2))
+    parts.append(_line(top_left + 56, top_plot_bottom, top_right - 24, top_plot_bottom, stroke="#334155", width=2))
+    for noise in noises:
+        series = rows_by_noise[noise]
+        payload = " ".join(
+            f"{map_x(row.coarse_prefix, top_left + 56, top_right - 24):.1f},{map_top_y(row.mean_abs_coarse_frequency_error):.1f}"
+            for row in series
+        )
+        parts.append(f'<polyline fill="none" stroke="{colors[noise]}" stroke-width="3.2" points="{payload}"/>')
+        for row in series:
+            x = map_x(row.coarse_prefix, top_left + 56, top_right - 24)
+            y = map_top_y(row.mean_abs_coarse_frequency_error)
+            parts.append(_circle(x, y, 4.4, fill=colors[noise], opacity=0.85))
+    parts.append(_text((top_left + top_right) / 2, top_bottom + 54, "coarse-prefix length (symbols)", anchor="middle", size=16, fill="#374151"))
+    parts.append(_text(28, (top_top + top_bottom) / 2, "mean |freq error| (mrad/sample)", anchor="middle", size=16, fill="#374151", transform=f'rotate(-90 28 {(top_top + top_bottom) / 2:.1f})'))
+
+    legend_x = top_right - 190
+    legend_y = top_top + 28
+    parts.append(f'<rect x="{legend_x:.1f}" y="{legend_y:.1f}" width="160" height="{34 + 22 * len(noises):.1f}" rx="14" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(legend_x + 18, legend_y + 22, "noise std", size=13, fill="#334155", weight="700"))
+    for idx, noise in enumerate(noises):
+        y = legend_y + 44 + idx * 22
+        parts.append(_line(legend_x + 18, y - 5, legend_x + 44, y - 5, stroke=colors[noise], width=4))
+        parts.append(_text(legend_x + 56, y, f"{noise:.2f}", size=13, fill="#334155", weight="700"))
+
+    # Lower-left panel.
+    parts.append(f'<rect x="{lower_left:.1f}" y="{lower_top:.1f}" width="{lower_right - lower_left:.1f}" height="{lower_bottom - lower_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(lower_left + 18, lower_top + 28, "Tracked tail RMS after the Costas loop", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(lower_left + 18, lower_top + 52, ["same trials, same outer-band offset", "this is the part that flattens once the handoff is already good enough"], size=14, fill="#526274", line_height=16))
+    for step in range(7):
+        frac = step / 6
+        y = lower_plot_top + frac * (lower_plot_bottom - lower_plot_top)
+        value = lower_y_hi - frac * (lower_y_hi - lower_y_lo)
+        parts.append(_line(lower_left + 56, y, lower_right - 24, y, stroke="#e2e8f0", dash="4 6"))
+        parts.append(_text(lower_left + 48, y + 5, f"{value:.3f}", anchor="end", size=13, fill="#64748b"))
+    for prefix in prefixes:
+        x = map_x(prefix, lower_left + 56, lower_right - 24)
+        parts.append(_line(x, lower_plot_top, x, lower_plot_bottom, stroke="#eef2f7", dash="4 6"))
+        parts.append(_text(x, lower_bottom + 24, str(prefix), anchor="middle", size=13, fill="#64748b"))
+    parts.append(_line(lower_left + 56, lower_plot_top, lower_left + 56, lower_plot_bottom, stroke="#334155", width=2))
+    parts.append(_line(lower_left + 56, lower_plot_bottom, lower_right - 24, lower_plot_bottom, stroke="#334155", width=2))
+    for noise in noises:
+        series = rows_by_noise[noise]
+        payload = " ".join(
+            f"{map_x(row.coarse_prefix, lower_left + 56, lower_right - 24):.1f},{map_lower_y(row.mean_tracked_rms_error):.1f}"
+            for row in series
+        )
+        parts.append(f'<polyline fill="none" stroke="{colors[noise]}" stroke-width="3.0" points="{payload}"/>')
+        for row in series:
+            x = map_x(row.coarse_prefix, lower_left + 56, lower_right - 24)
+            y = map_lower_y(row.mean_tracked_rms_error)
+            parts.append(_circle(x, y, 4.1, fill=colors[noise], opacity=0.82))
+    parts.append(_text((lower_left + lower_right) / 2, lower_bottom + 54, "coarse-prefix length (symbols)", anchor="middle", size=16, fill="#374151"))
+    parts.append(_text(28, (lower_top + lower_bottom) / 2, "tracked RMS error", anchor="middle", size=16, fill="#374151", transform=f'rotate(-90 28 {(lower_top + lower_bottom) / 2:.1f})'))
+
+    # Summary panel.
+    parts.append(f'<rect x="{summary_left:.1f}" y="{summary_top:.1f}" width="{summary_right - summary_left:.1f}" height="{summary_bottom - summary_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(summary_left + 18, summary_top + 28, "Where the diminishing returns start", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(summary_left + 18, summary_top + 52, ["threshold = first prefix whose mean coarse-frequency error drops below 5 mrad/sample", "the loop panel shows why this is mostly a front-end honesty story"], size=13, fill="#526274", line_height=16))
+
+    row_top = summary_top + 122
+    row_gap = 42
+    for idx, noise in enumerate(noises):
+        y = row_top + idx * row_gap
+        series = rows_by_noise[noise]
+        threshold = threshold_prefix(noise, target_milli=5.0)
+        baseline = series[0].mean_abs_coarse_frequency_error * 1000.0
+        best = series[-1].mean_abs_coarse_frequency_error * 1000.0
+        tracked_delta = (series[0].mean_tracked_rms_error - series[-1].mean_tracked_rms_error)
+        parts.append(_text(summary_left + 18, y + 4, f"noise {noise:.2f}", size=14, fill=colors[noise], weight="700"))
+        parts.append(_text(summary_left + 126, y + 4, f"8→128: mean coarse error {baseline:.1f} → {best:.1f} mrad", size=13, fill="#334155"))
+        threshold_text = f"crosses 5 mrad by prefix {threshold}" if threshold is not None else "still above 5 mrad at prefix 128"
+        parts.append(_text(summary_left + 126, y + 24, threshold_text, size=12, fill="#526274"))
+        parts.append(_text(summary_right - 24, y + 4, f"tracked RMS Δ {tracked_delta:+.4f}", anchor="end", size=12, fill="#526274"))
 
     parts.append('</svg>')
     output.write_text("\n".join(parts) + "\n")

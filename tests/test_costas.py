@@ -3,7 +3,7 @@ from __future__ import annotations
 import cmath
 import unittest
 
-from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
+from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from costaslab.loop import coarse_fourth_power_frequency, coarse_fourth_power_phase, run_qpsk_costas_loop
 from costaslab.signal import hard_decision_qpsk, qpsk_symbols, rotate_symbols
 
@@ -78,6 +78,17 @@ class CostasLoopTests(unittest.TestCase):
         self.assertLess(by_label["gentle"].tracking_freq_jitter, by_label["default"].tracking_freq_jitter)
         self.assertLess(by_label["default"].tracking_freq_jitter, by_label["aggressive"].tracking_freq_jitter)
         self.assertLess(by_label["gentle"].tracking_tail_rms_error, by_label["aggressive"].tracking_tail_rms_error)
+
+    def test_coarse_prefix_budget_shows_honesty_improves_faster_than_post_lock_output(self) -> None:
+        rows = study_coarse_prefix_budget([8, 16, 32, 64], [0.08], trials=8)
+        by_prefix = {row.coarse_prefix: row for row in rows}
+
+        self.assertGreater(by_prefix[8].mean_abs_coarse_frequency_error, by_prefix[16].mean_abs_coarse_frequency_error)
+        self.assertGreater(by_prefix[16].mean_abs_coarse_frequency_error, by_prefix[32].mean_abs_coarse_frequency_error)
+        self.assertGreater(by_prefix[8].mean_abs_coarse_frequency_error, by_prefix[64].mean_abs_coarse_frequency_error)
+
+        tracked_span = max(row.mean_tracked_rms_error for row in rows) - min(row.mean_tracked_rms_error for row in rows)
+        self.assertLess(tracked_span, 0.002)
 
 
 if __name__ == "__main__":

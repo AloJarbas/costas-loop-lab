@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
+from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from costaslab.loop import run_qpsk_costas_loop
-from costaslab.render import export_png_from_svg, render_acquisition_range_svg, render_costas_demo_svg, render_loop_gain_tradeoff_svg, render_offset_sweep_svg
+from costaslab.render import export_png_from_svg, render_acquisition_range_svg, render_coarse_prefix_budget_svg, render_costas_demo_svg, render_loop_gain_tradeoff_svg, render_offset_sweep_svg
 from costaslab.signal import qpsk_symbols, rotate_symbols
 
 ASSETS = REPO / "assets"
@@ -42,6 +43,30 @@ def main() -> None:
     gain_studies = study_loop_gains(gain_settings)
     render_loop_gain_tradeoff_svg(gain_studies, output=ASSETS / "qpsk-loop-gain-tradeoffs.svg")
     export_png_from_svg(ASSETS / "qpsk-loop-gain-tradeoffs.svg", ASSETS / "qpsk-loop-gain-tradeoffs.png")
+
+    prefix_rows = study_coarse_prefix_budget([8, 12, 16, 24, 32, 48, 64, 96, 128], [0.02, 0.04, 0.06, 0.08, 0.10])
+    render_coarse_prefix_budget_svg(prefix_rows, output=ASSETS / "qpsk-coarse-prefix-budget.svg")
+    export_png_from_svg(ASSETS / "qpsk-coarse-prefix-budget.svg", ASSETS / "qpsk-coarse-prefix-budget.png")
+
+    with (ASSETS / "qpsk-coarse-prefix-budget.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
+            "coarse_prefix",
+            "noise_std",
+            "mean_abs_coarse_frequency_error",
+            "mean_coarse_rms_error",
+            "mean_tracked_rms_error",
+        ])
+        for row in prefix_rows:
+            writer.writerow(
+                [
+                    row.coarse_prefix,
+                    f"{row.noise_std:.2f}",
+                    f"{row.mean_abs_coarse_frequency_error:.8f}",
+                    f"{row.mean_coarse_rms_error:.8f}",
+                    f"{row.mean_tracked_rms_error:.8f}",
+                ]
+            )
 
     lines = [
         "# QPSK carrier-recovery report",
@@ -148,6 +173,51 @@ def main() -> None:
         ]
     )
     (REPORTS / "qpsk-loop-gain-tradeoffs.md").write_text("\n".join(gain_lines) + "\n")
+
+    prefix_lines = [
+        "# QPSK coarse-prefix budget report",
+        "",
+        "This pass asks a narrower front-end question: **once a 4th-power frequency estimate is already inside the Costas loop's pull-in range, how many prefix symbols still matter?**",
+        "",
+        "The setup stays fixed on purpose:",
+        "",
+        "- carrier offset: `+0.62 rad/sample`",
+        "- same phase offset and loop gains as the rest of the repo",
+        "- only the coarse-prefix length and channel noise change",
+        "- each grid point averages 24 Monte Carlo trials",
+        "",
+        "## Main takeaway",
+        "",
+        "Longer prefixes keep improving the coarse estimate, but the tracked output flattens much sooner.",
+        "In this symbol-rate model, the front end gets materially more honest all the way out to 96 or 128 symbols, yet the loop behaves almost the same once the handoff already lands inside its comfort zone.",
+        "",
+        "That means extra prefix length buys estimator honesty before it buys visible post-lock improvement.",
+        "",
+        "## Selected checkpoints",
+        "",
+    ]
+    for noise_std in sorted({row.noise_std for row in prefix_rows}):
+        band = [row for row in prefix_rows if row.noise_std == noise_std]
+        first = band[0]
+        mid = next(row for row in band if row.coarse_prefix == 32)
+        long = next(row for row in band if row.coarse_prefix == 128)
+        threshold = next((row.coarse_prefix for row in band if row.mean_abs_coarse_frequency_error * 1000.0 <= 5.0), None)
+        prefix_lines.append(
+            f"- noise std {noise_std:.2f}: mean |coarse freq error| drops from {first.mean_abs_coarse_frequency_error * 1000.0:.1f} mrad at prefix 8 to {mid.mean_abs_coarse_frequency_error * 1000.0:.1f} mrad at prefix 32 and {long.mean_abs_coarse_frequency_error * 1000.0:.1f} mrad at prefix 128; tracked RMS only moves from {first.mean_tracked_rms_error:.4f} to {long.mean_tracked_rms_error:.4f}; 5 mrad threshold = {'not reached' if threshold is None else f'prefix {threshold}'}"
+        )
+
+    prefix_lines.extend(
+        [
+            "",
+            "## How to read the artifact",
+            "",
+            "The top panel of `assets/qpsk-coarse-prefix-budget.png` shows the honest front-end story: more symbols make the 4th-power estimate noticeably less noisy, especially once the channel noise rises.",
+            "The lower-left panel shows the practical receive-chain story: after the loop takes over, most of that front-end improvement barely changes the post-lock RMS unless the prefix was already too short.",
+            "",
+            "That is the point of the card. A bigger prefix is not useless. It is just solving a different problem once the handoff is already decent.",
+        ]
+    )
+    (REPORTS / "qpsk-coarse-prefix-budget.md").write_text("\n".join(prefix_lines) + "\n")
     print("generated Costas-loop gallery and report")
 
 
