@@ -8,9 +8,9 @@ import sys
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
+from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_alias_limit, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from costaslab.loop import run_qpsk_costas_loop
-from costaslab.render import export_png_from_svg, render_acquisition_range_svg, render_coarse_prefix_budget_svg, render_costas_demo_svg, render_loop_gain_tradeoff_svg, render_offset_sweep_svg
+from costaslab.render import export_png_from_svg, render_acquisition_range_svg, render_alias_limit_svg, render_coarse_prefix_budget_svg, render_costas_demo_svg, render_loop_gain_tradeoff_svg, render_offset_sweep_svg
 from costaslab.signal import qpsk_symbols, rotate_symbols
 
 ASSETS = REPO / "assets"
@@ -140,6 +140,89 @@ def main() -> None:
     )
     (REPORTS / "qpsk-frequency-acquisition.md").write_text("\n".join(acquisition_lines) + "\n")
 
+    alias_rows = study_alias_limit([(-1.0 + 0.05 * idx) for idx in range(41)])
+    render_alias_limit_svg(alias_rows, output=ASSETS / "qpsk-alias-limit-map.svg")
+    export_png_from_svg(ASSETS / "qpsk-alias-limit-map.svg", ASSETS / "qpsk-alias-limit-map.png")
+
+    with (ASSETS / "qpsk-alias-limit-map.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "freq_offset",
+                "coarse_frequency_estimate",
+                "wrapped_residual_frequency",
+                "phase_only_tracked_rms_error",
+                "freq_acquired_tracked_rms_error",
+                "phase_only_symbol_error_rate",
+                "freq_acquired_symbol_error_rate",
+            ]
+        )
+        for row in alias_rows:
+            writer.writerow(
+                [
+                    f"{row.freq_offset:.6f}",
+                    f"{row.coarse_frequency_estimate:.6f}",
+                    f"{row.wrapped_residual_frequency:.6f}",
+                    f"{row.phase_only_tracked_rms_error:.6f}",
+                    f"{row.freq_acquired_tracked_rms_error:.6f}",
+                    f"{row.phase_only_symbol_error_rate:.6f}",
+                    f"{row.freq_acquired_symbol_error_rate:.6f}",
+                ]
+            )
+
+    alias_lines = [
+        "# QPSK alias-limit report",
+        "",
+        "This sidecar asks a narrower question than the acquisition-range map: **what actually breaks once the 4th-power frequency estimate crosses its `pi/4` alias limit?**",
+        "",
+        "The useful answer is not just \"the estimate wraps.\" The more interesting failure is that the constellation can still look clean under the old nearest-corner RMS metric even while the symbol labels are wrong.",
+        "",
+        "## The core identity",
+        "",
+        "For a QPSK symbol-rate model, the 4th-power front end sees `4 * freq_offset`.",
+        "That means the estimate is unique only while `|freq_offset| < pi/4`.",
+        "Once the true offset crosses that boundary, the coarse estimate folds onto the wrong branch and leaves a residual close to `±pi/2` rad/sample after coarse correction.",
+        "",
+        "## Why the old RMS metric can lie",
+        "",
+        "A residual near `pi/2` rad/sample quarter-turns the constellation from one symbol to the next.",
+        "Nearest-corner RMS is blind to that if the cloud still lands on QPSK corners.",
+        "So the scatter can look clean while a fixed symbol labeling has already collapsed.",
+        "",
+        "## Sweep summary",
+        "",
+    ]
+
+    clean_freq = [abs(row.freq_offset) for row in alias_rows if row.freq_acquired_symbol_error_rate <= 0.01]
+    false_clean = [row for row in alias_rows if row.freq_acquired_tracked_rms_error < 0.10 and row.freq_acquired_symbol_error_rate >= 0.70]
+    alias_lines.append(f"- freq + phase acquisition keeps best static-quadrant SER near zero out to about ±{(max(clean_freq) if clean_freq else 0.0):.2f} rad/sample")
+    if false_clean:
+        first_false = min(false_clean, key=lambda row: abs(row.freq_offset))
+        alias_lines.append(
+            f"- the first false-clean point in this sweep shows up around {first_false.freq_offset:+.2f} rad/sample: tracked RMS still reads {first_false.freq_acquired_tracked_rms_error:.3f}, but best static-quadrant SER is already {first_false.freq_acquired_symbol_error_rate:.2f}"
+        )
+    pivot = min(alias_rows, key=lambda row: abs(row.freq_offset - 0.85))
+    alias_lines.append(
+        f"- at {pivot.freq_offset:+.2f} rad/sample, the coarse estimate folds to {pivot.coarse_frequency_estimate:+.3f}, leaving a wrapped residual of {pivot.wrapped_residual_frequency:+.3f} rad/sample while the tracked RMS stays at {pivot.freq_acquired_tracked_rms_error:.3f}"
+    )
+    alias_lines.append("")
+    alias_lines.append("## Per-offset comparison")
+    alias_lines.append("")
+    for row in alias_rows:
+        alias_lines.append(
+            f"- {row.freq_offset:+.3f} rad/sample -> estimate {row.coarse_frequency_estimate:+.3f}, wrapped residual {row.wrapped_residual_frequency:+.3f}, phase-only SER {row.phase_only_symbol_error_rate:.2f}, freq-acquired SER {row.freq_acquired_symbol_error_rate:.2f}, freq-acquired tracked RMS {row.freq_acquired_tracked_rms_error:.3f}"
+        )
+
+    alias_lines.extend(
+        [
+            "",
+            "## Read the artifact",
+            "",
+            "Open `assets/qpsk-alias-limit-map.png` next. The top panel shows the coarse estimate folding onto the wrong branch, the lower-left panel shows why nearest-corner RMS still looks deceptively calm, and the lower-right panel shows the real cliff once you measure symbol agreement after the best static quadrant relabeling.",
+        ]
+    )
+    (REPORTS / "qpsk-alias-limit.md").write_text("\n".join(alias_lines) + "\n")
+
     gain_lines = [
         "# QPSK loop-gain tradeoff report",
         "",
@@ -218,7 +301,7 @@ def main() -> None:
         ]
     )
     (REPORTS / "qpsk-coarse-prefix-budget.md").write_text("\n".join(prefix_lines) + "\n")
-    print("generated Costas-loop gallery and report")
+    print("generated Costas-loop gallery, alias-limit sidecar, and report")
 
 
 if __name__ == "__main__":

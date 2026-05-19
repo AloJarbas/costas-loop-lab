@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import cmath
 from dataclasses import dataclass
 import math
 
-from .loop import LoopTrace, run_qpsk_costas_loop
+from .loop import LoopTrace, run_qpsk_costas_loop, wrap_phase
 from .signal import hard_decision_qpsk, qpsk_symbols, rotate_symbols
 
 
@@ -46,6 +47,17 @@ class CoarsePrefixBudgetRow:
     mean_abs_coarse_frequency_error: float
     mean_coarse_rms_error: float
     mean_tracked_rms_error: float
+
+
+@dataclass(frozen=True)
+class AliasLimitRow:
+    freq_offset: float
+    coarse_frequency_estimate: float
+    wrapped_residual_frequency: float
+    phase_only_tracked_rms_error: float
+    freq_acquired_tracked_rms_error: float
+    phase_only_symbol_error_rate: float
+    freq_acquired_symbol_error_rate: float
 
 
 def quality_band(rms_error: float) -> str:
@@ -106,6 +118,26 @@ def population_std(values: list[float]) -> float:
         return 0.0
     mean = sum(values) / len(values)
     return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+
+
+def best_static_qpsk_symbol_error_rate(reference_symbols: list[complex], samples: list[complex], *, trim: int = 0) -> float:
+    ref_view = reference_symbols[trim:] if trim else reference_symbols
+    sample_view = samples[trim:] if trim else samples
+    if not ref_view or not sample_view:
+        return 0.0
+    count = min(len(ref_view), len(sample_view))
+    ref_view = ref_view[:count]
+    sample_view = sample_view[:count]
+
+    best = 1.0
+    for quarter_turn in range(4):
+        rotation = cmath.exp(-1j * quarter_turn * math.pi / 2.0)
+        errors = 0
+        for reference, sample in zip(ref_view, sample_view):
+            if hard_decision_qpsk(sample * rotation) != reference:
+                errors += 1
+        best = min(best, errors / count)
+    return best
 
 
 def sweep_frequency_offsets(
@@ -291,4 +323,39 @@ def study_coarse_prefix_budget(
                     mean_tracked_rms_error=sum(tracked_rms_errors) / len(tracked_rms_errors),
                 )
             )
+    return rows
+
+
+def study_alias_limit(
+    offsets: list[float],
+    *,
+    count: int = 900,
+    phase_offset: float = 0.85,
+    noise_std: float = 0.04,
+    alpha: float = 0.11,
+    beta: float = 0.0045,
+    coarse_prefix: int = 64,
+    seed: int = 7,
+    trim: int = 180,
+) -> list[AliasLimitRow]:
+    if not offsets:
+        raise ValueError("offsets must not be empty")
+
+    symbols = qpsk_symbols(count, seed=seed)
+    rows: list[AliasLimitRow] = []
+    for offset in offsets:
+        received = rotate_symbols(symbols, phase_offset=phase_offset, freq_offset=offset, noise_std=noise_std, seed=seed + 1)
+        phase_only = run_qpsk_costas_loop(received, alpha=alpha, beta=beta, coarse_prefix=coarse_prefix, coarse_mode="phase")
+        freq_acquired = run_qpsk_costas_loop(received, alpha=alpha, beta=beta, coarse_prefix=coarse_prefix, coarse_mode="freq_phase")
+        rows.append(
+            AliasLimitRow(
+                freq_offset=offset,
+                coarse_frequency_estimate=freq_acquired.coarse_frequency,
+                wrapped_residual_frequency=wrap_phase(offset - freq_acquired.coarse_frequency),
+                phase_only_tracked_rms_error=rms_decision_error(phase_only.tracked, trim=trim),
+                freq_acquired_tracked_rms_error=rms_decision_error(freq_acquired.tracked, trim=trim),
+                phase_only_symbol_error_rate=best_static_qpsk_symbol_error_rate(symbols, phase_only.tracked, trim=trim),
+                freq_acquired_symbol_error_rate=best_static_qpsk_symbol_error_rate(symbols, freq_acquired.tracked, trim=trim),
+            )
+        )
     return rows

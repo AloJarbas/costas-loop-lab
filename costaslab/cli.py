@@ -5,11 +5,12 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 
-from .analysis import LoopGainSetting, rms_decision_error, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
+from .analysis import LoopGainSetting, rms_decision_error, study_alias_limit, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from .loop import run_qpsk_costas_loop
 from .render import (
     export_png_from_svg,
     render_acquisition_range_svg,
+    render_alias_limit_svg,
     render_costas_demo_svg,
     render_loop_gain_tradeoff_svg,
     render_coarse_prefix_budget_svg,
@@ -83,6 +84,21 @@ def main() -> None:
     prefix_study.add_argument("--base-seed", type=int, default=41)
     prefix_study.add_argument("--output", type=Path, default=None)
     prefix_study.add_argument("--png-output", type=Path, default=None)
+
+    alias_study = sub.add_parser("alias-limit-study", help="show where the 4th-power frequency estimate folds and why nearest-corner RMS can lie")
+    alias_study.add_argument("--min-offset", type=float, default=-1.0)
+    alias_study.add_argument("--max-offset", type=float, default=1.0)
+    alias_study.add_argument("--steps", type=int, default=41)
+    alias_study.add_argument("--count", type=int, default=900)
+    alias_study.add_argument("--seed", type=int, default=7)
+    alias_study.add_argument("--phase-offset", type=float, default=0.85)
+    alias_study.add_argument("--noise-std", type=float, default=0.04)
+    alias_study.add_argument("--alpha", type=float, default=0.11)
+    alias_study.add_argument("--beta", type=float, default=0.0045)
+    alias_study.add_argument("--coarse-prefix", type=int, default=64)
+    alias_study.add_argument("--trim", type=int, default=180)
+    alias_study.add_argument("--output", type=Path, default=None)
+    alias_study.add_argument("--png-output", type=Path, default=None)
 
     args = parser.parse_args()
 
@@ -186,6 +202,26 @@ def main() -> None:
             export_png_from_svg(args.output, args.png_output)
         payload = [asdict(row) for row in rows]
         print(json.dumps(payload, indent=2))
+        return
+
+    if args.command == "alias-limit-study":
+        offsets = [args.min_offset + idx * (args.max_offset - args.min_offset) / (args.steps - 1) for idx in range(args.steps)]
+        rows = study_alias_limit(
+            offsets,
+            count=args.count,
+            phase_offset=args.phase_offset,
+            noise_std=args.noise_std,
+            alpha=args.alpha,
+            beta=args.beta,
+            coarse_prefix=args.coarse_prefix,
+            seed=args.seed,
+            trim=args.trim,
+        )
+        if args.output is not None:
+            render_alias_limit_svg(rows, output=args.output)
+        if args.png_output is not None and args.output is not None:
+            export_png_from_svg(args.output, args.png_output)
+        print(json.dumps([asdict(row) for row in rows], indent=2))
         return
 
     offsets = [args.min_offset + idx * (args.max_offset - args.min_offset) / (args.steps - 1) for idx in range(args.steps)]

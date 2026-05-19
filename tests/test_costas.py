@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import cmath
+import math
 import unittest
 
-from costaslab.analysis import LoopGainSetting, quality_band, rms_decision_error, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
+from costaslab.analysis import LoopGainSetting, best_static_qpsk_symbol_error_rate, quality_band, rms_decision_error, study_alias_limit, study_coarse_prefix_budget, study_loop_gains, sweep_acquisition_modes, sweep_frequency_offsets
 from costaslab.loop import coarse_fourth_power_frequency, coarse_fourth_power_phase, run_qpsk_costas_loop
 from costaslab.signal import hard_decision_qpsk, qpsk_symbols, rotate_symbols
 
@@ -89,6 +90,25 @@ class CostasLoopTests(unittest.TestCase):
 
         tracked_span = max(row.mean_tracked_rms_error for row in rows) - min(row.mean_tracked_rms_error for row in rows)
         self.assertLess(tracked_span, 0.002)
+
+    def test_best_static_symbol_error_rate_ignores_constant_quadrant_rotation(self) -> None:
+        symbols = qpsk_symbols(256, seed=31)
+        rotated = [sample * cmath.exp(1j * (math.pi / 2.0)) for sample in symbols]
+        self.assertEqual(best_static_qpsk_symbol_error_rate(symbols, rotated), 0.0)
+
+    def test_alias_limit_stays_clean_below_pi_over_four(self) -> None:
+        rows = study_alias_limit([0.70], count=900)
+        row = rows[0]
+        self.assertAlmostEqual(row.coarse_frequency_estimate, 0.70, delta=0.02)
+        self.assertLess(abs(row.wrapped_residual_frequency), 0.05)
+        self.assertLess(row.freq_acquired_symbol_error_rate, 0.01)
+
+    def test_alias_limit_reveals_false_clean_failure_above_pi_over_four(self) -> None:
+        rows = study_alias_limit([0.85], count=900)
+        row = rows[0]
+        self.assertLess(row.freq_acquired_tracked_rms_error, 0.10)
+        self.assertGreater(row.freq_acquired_symbol_error_rate, 0.70)
+        self.assertAlmostEqual(abs(row.wrapped_residual_frequency), math.pi / 2.0, delta=0.08)
 
 
 if __name__ == "__main__":

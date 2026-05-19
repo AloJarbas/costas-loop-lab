@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .analysis import CoarsePrefixBudgetRow, AcquisitionSweepRow, LoopGainStudy, decision_error_series, moving_average, quality_band, sweep_frequency_offsets
+from .analysis import AliasLimitRow, CoarsePrefixBudgetRow, AcquisitionSweepRow, LoopGainStudy, decision_error_series, moving_average, quality_band, sweep_frequency_offsets
 from .loop import LoopTrace
 
 
@@ -672,6 +672,189 @@ def render_coarse_prefix_budget_svg(
         threshold_text = f"crosses 5 mrad by prefix {threshold}" if threshold is not None else "still above 5 mrad at prefix 128"
         parts.append(_text(summary_left + 126, y + 24, threshold_text, size=12, fill="#526274"))
         parts.append(_text(summary_right - 24, y + 4, f"tracked RMS Δ {tracked_delta:+.4f}", anchor="end", size=12, fill="#526274"))
+
+    parts.append('</svg>')
+    output.write_text("\n".join(parts) + "\n")
+
+
+def render_alias_limit_svg(
+    rows: list[AliasLimitRow],
+    *,
+    output: str | Path,
+    title: str = "QPSK 4th-power alias limit: wrapped estimate versus symbol error",
+) -> None:
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        raise ValueError("rows must not be empty")
+
+    width = 1600
+    height = 1600
+    panel_left = 80.0
+    panel_right = 1520.0
+    top_top, top_bottom = 118.0, 510.0
+    middle_top, middle_bottom = 560.0, 1020.0
+    bottom_top, bottom_bottom = 1070.0, 1530.0
+    top_plot_top, top_plot_bottom = top_top + 96.0, top_bottom - 30.0
+    middle_plot_top, middle_plot_bottom = middle_top + 98.0, middle_bottom - 34.0
+    bottom_plot_top, bottom_plot_bottom = bottom_top + 98.0, bottom_bottom - 60.0
+
+    x_lo = min(row.freq_offset for row in rows)
+    x_hi = max(row.freq_offset for row in rows)
+    top_y_limit = max(abs(row.freq_offset) for row in rows)
+    top_y_limit = max(
+        top_y_limit,
+        max(abs(row.coarse_frequency_estimate) for row in rows),
+        max(abs(row.wrapped_residual_frequency) for row in rows),
+        1.65,
+    ) * 1.05
+    lower_y_hi = max(
+        max(row.phase_only_tracked_rms_error for row in rows),
+        max(row.freq_acquired_tracked_rms_error for row in rows),
+        0.12,
+    ) * 1.08
+
+    alias_limit = 0.25 * 3.141592653589793
+
+    def map_x(value: float) -> float:
+        return panel_left + 58.0 + (value - x_lo) / (x_hi - x_lo) * ((panel_right - 26.0) - (panel_left + 58.0))
+
+    def map_top_y(value: float) -> float:
+        return top_plot_bottom - (value + top_y_limit) / (2.0 * top_y_limit) * (top_plot_bottom - top_plot_top)
+
+    def map_middle_y(value: float) -> float:
+        return middle_plot_bottom - (value / lower_y_hi) * (middle_plot_bottom - middle_plot_top)
+
+    def map_bottom_y(value: float) -> float:
+        return bottom_plot_bottom - value * (bottom_plot_bottom - bottom_plot_top)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">',
+        '<rect width="100%" height="100%" fill="#f8fafc"/>',
+        _text(width / 2, 42, title, size=26, anchor="middle", weight="700"),
+        _paragraph(
+            width / 2,
+            68,
+            [
+                "The 4th-power front end is only unique while |ω| < π/4.",
+                "Past that point, a clean-looking corner cloud can still hide wrong symbols.",
+            ],
+            size=14,
+            anchor="middle",
+            fill="#475569",
+            line_height=18,
+        ),
+    ]
+
+    # Top panel.
+    parts.append(f'<rect x="{panel_left:.1f}" y="{top_top:.1f}" width="{panel_right - panel_left:.1f}" height="{top_bottom - top_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(panel_left + 18, top_top + 28, "Coarse estimate and wrapped residual", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(panel_left + 18, top_top + 52, ["Blue = 4th-power estimate.", "Amber = true offset minus that estimate, wrapped back to (-π, π]."], size=13, fill="#526274", line_height=16))
+    for step in range(9):
+        frac = step / 8
+        y = top_plot_top + frac * (top_plot_bottom - top_plot_top)
+        value = top_y_limit - frac * (2.0 * top_y_limit)
+        parts.append(_line(panel_left + 58, y, panel_right - 26, y, stroke="#e2e8f0", dash="4 6"))
+        parts.append(_text(panel_left + 50, y + 5, f"{value:+.2f}", anchor="end", size=13, fill="#64748b"))
+    for step in range(9):
+        frac = step / 8
+        x = panel_left + 58 + frac * ((panel_right - 26) - (panel_left + 58))
+        value = x_lo + frac * (x_hi - x_lo)
+        parts.append(_line(x, top_plot_top, x, top_plot_bottom, stroke="#eef2f7", dash="4 6"))
+        parts.append(_text(x, top_bottom + 24, f"{value:+.02f}", anchor="middle", size=13, fill="#64748b"))
+    parts.append(_line(panel_left + 58, top_plot_top, panel_left + 58, top_plot_bottom, stroke="#334155", width=2))
+    parts.append(_line(panel_left + 58, top_plot_bottom, panel_right - 26, top_plot_bottom, stroke="#334155", width=2))
+    for marker, label in ((-alias_limit, "-π/4"), (alias_limit, "+π/4")):
+        x = map_x(marker)
+        parts.append(_line(x, top_plot_top, x, top_plot_bottom, stroke="#f59e0b", width=2.0, dash="10 8"))
+        parts.append(_text(x, top_plot_top - 8, label, anchor="middle", size=13, fill="#b45309", weight="700"))
+    for marker in (-0.5 * 3.141592653589793, 0.0, 0.5 * 3.141592653589793):
+        parts.append(_line(panel_left + 58, map_top_y(marker), panel_right - 26, map_top_y(marker), stroke="#cbd5e1", width=1.6, dash="8 8"))
+
+    ideal = " ".join(f"{map_x(row.freq_offset):.1f},{map_top_y(row.freq_offset):.1f}" for row in rows)
+    estimate = " ".join(f"{map_x(row.freq_offset):.1f},{map_top_y(row.coarse_frequency_estimate):.1f}" for row in rows)
+    residual = " ".join(f"{map_x(row.freq_offset):.1f},{map_top_y(row.wrapped_residual_frequency):.1f}" for row in rows)
+    parts.append(f'<polyline fill="none" stroke="#94a3b8" stroke-width="2.2" stroke-dasharray="8 8" points="{ideal}"/>')
+    parts.append(f'<polyline fill="none" stroke="#2563eb" stroke-width="3.2" points="{estimate}"/>')
+    parts.append(f'<polyline fill="none" stroke="#f59e0b" stroke-width="3.2" points="{residual}"/>')
+    parts.append(_text(width / 2, top_bottom + 54, "true carrier offset (rad/sample)", anchor="middle", size=16, fill="#374151"))
+    parts.append(_text(28, (top_top + top_bottom) / 2, "estimate / wrapped residual", anchor="middle", size=16, fill="#374151", transform=f'rotate(-90 28 {(top_top + top_bottom) / 2:.1f})'))
+    parts.append(f'<rect x="{panel_right - 264:.1f}" y="{top_top + 22:.1f}" width="224" height="90" rx="14" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_line(panel_right - 246, top_top + 44, panel_right - 218, top_top + 44, stroke="#94a3b8", width=2.2, dash="8 8"))
+    parts.append(_text(panel_right - 206, top_top + 48, "true offset", size=13, fill="#64748b", weight="700"))
+    parts.append(_line(panel_right - 246, top_top + 67, panel_right - 218, top_top + 67, stroke="#2563eb", width=3.2))
+    parts.append(_text(panel_right - 206, top_top + 71, "4th-power estimate", size=13, fill="#2563eb", weight="700"))
+    parts.append(_line(panel_right - 246, top_top + 90, panel_right - 218, top_top + 90, stroke="#f59e0b", width=3.2))
+    parts.append(_text(panel_right - 206, top_top + 94, "wrapped residual", size=13, fill="#b45309", weight="700"))
+
+    # Middle panel.
+    parts.append(f'<rect x="{panel_left:.1f}" y="{middle_top:.1f}" width="{panel_right - panel_left:.1f}" height="{middle_bottom - middle_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(panel_left + 18, middle_top + 28, "Nearest-corner RMS after tracking", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(panel_left + 18, middle_top + 52, ["This is the old metric.", "It still looks calm even after the alias fold."], size=13, fill="#526274", line_height=16))
+    for step in range(7):
+        frac = step / 6
+        y = middle_plot_top + frac * (middle_plot_bottom - middle_plot_top)
+        value = lower_y_hi - frac * lower_y_hi
+        parts.append(_line(panel_left + 58, y, panel_right - 26, y, stroke="#e2e8f0", dash="4 6"))
+        parts.append(_text(panel_left + 50, y + 5, f"{value:.2f}", anchor="end", size=13, fill="#64748b"))
+    for step in range(7):
+        frac = step / 6
+        x = panel_left + 58 + frac * ((panel_right - 26) - (panel_left + 58))
+        value = x_lo + frac * (x_hi - x_lo)
+        parts.append(_line(x, middle_plot_top, x, middle_plot_bottom, stroke="#eef2f7", dash="4 6"))
+        parts.append(_text(x, middle_bottom + 24, f"{value:+.02f}", anchor="middle", size=13, fill="#64748b"))
+    parts.append(_line(panel_left + 58, middle_plot_top, panel_left + 58, middle_plot_bottom, stroke="#334155", width=2))
+    parts.append(_line(panel_left + 58, middle_plot_bottom, panel_right - 26, middle_plot_bottom, stroke="#334155", width=2))
+    for marker in (-alias_limit, alias_limit):
+        x = map_x(marker)
+        parts.append(_line(x, middle_plot_top, x, middle_plot_bottom, stroke="#f59e0b", width=2.0, dash="10 8"))
+    phase_rms = " ".join(f"{map_x(row.freq_offset):.1f},{map_middle_y(row.phase_only_tracked_rms_error):.1f}" for row in rows)
+    freq_rms = " ".join(f"{map_x(row.freq_offset):.1f},{map_middle_y(row.freq_acquired_tracked_rms_error):.1f}" for row in rows)
+    parts.append(f'<polyline fill="none" stroke="#ef4444" stroke-width="3.0" points="{phase_rms}"/>')
+    parts.append(f'<polyline fill="none" stroke="#2563eb" stroke-width="3.3" points="{freq_rms}"/>')
+    parts.append(_text(width / 2, middle_bottom + 54, "true carrier offset (rad/sample)", anchor="middle", size=16, fill="#374151"))
+    parts.append(_text(28, (middle_top + middle_bottom) / 2, "tracked RMS to nearest corner", anchor="middle", size=16, fill="#374151", transform=f'rotate(-90 28 {(middle_top + middle_bottom) / 2:.1f})'))
+    parts.append(f'<rect x="{panel_right - 236:.1f}" y="{middle_top + 24:.1f}" width="196" height="64" rx="14" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_line(panel_right - 218, middle_top + 46, panel_right - 190, middle_top + 46, stroke="#ef4444", width=3.0))
+    parts.append(_text(panel_right - 178, middle_top + 50, "phase-only", size=13, fill="#ef4444", weight="700"))
+    parts.append(_line(panel_right - 218, middle_top + 68, panel_right - 190, middle_top + 68, stroke="#2563eb", width=3.2))
+    parts.append(_text(panel_right - 178, middle_top + 72, "freq-acquired", size=13, fill="#2563eb", weight="700"))
+
+    # Bottom panel.
+    parts.append(f'<rect x="{panel_left:.1f}" y="{bottom_top:.1f}" width="{panel_right - panel_left:.1f}" height="{bottom_bottom - bottom_top:.1f}" rx="18" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_text(panel_left + 18, bottom_top + 28, "Best static-quadrant SER", size=16, weight="700", fill="#334155"))
+    parts.append(_paragraph(panel_left + 18, bottom_top + 52, ["This forgives one constant 90° ambiguity.", "It does not forgive a quarter-turn ramp from symbol to symbol."], size=13, fill="#526274", line_height=16))
+    for step in range(6):
+        frac = step / 5
+        y = bottom_plot_top + frac * (bottom_plot_bottom - bottom_plot_top)
+        value = 1.0 - frac
+        parts.append(_line(panel_left + 58, y, panel_right - 26, y, stroke="#e2e8f0", dash="4 6"))
+        parts.append(_text(panel_left + 50, y + 5, f"{value:.1f}", anchor="end", size=13, fill="#64748b"))
+    for step in range(7):
+        frac = step / 6
+        x = panel_left + 58 + frac * ((panel_right - 26) - (panel_left + 58))
+        value = x_lo + frac * (x_hi - x_lo)
+        parts.append(_line(x, bottom_plot_top, x, bottom_plot_bottom, stroke="#eef2f7", dash="4 6"))
+        parts.append(_text(x, bottom_bottom + 24, f"{value:+.02f}", anchor="middle", size=13, fill="#64748b"))
+    parts.append(_line(panel_left + 58, bottom_plot_top, panel_left + 58, bottom_plot_bottom, stroke="#334155", width=2))
+    parts.append(_line(panel_left + 58, bottom_plot_bottom, panel_right - 26, bottom_plot_bottom, stroke="#334155", width=2))
+    for marker in (-alias_limit, alias_limit):
+        x = map_x(marker)
+        parts.append(_line(x, bottom_plot_top, x, bottom_plot_bottom, stroke="#f59e0b", width=2.0, dash="10 8"))
+    phase_ser = " ".join(f"{map_x(row.freq_offset):.1f},{map_bottom_y(row.phase_only_symbol_error_rate):.1f}" for row in rows)
+    freq_ser = " ".join(f"{map_x(row.freq_offset):.1f},{map_bottom_y(row.freq_acquired_symbol_error_rate):.1f}" for row in rows)
+    parts.append(f'<polyline fill="none" stroke="#ef4444" stroke-width="3.0" points="{phase_ser}"/>')
+    parts.append(f'<polyline fill="none" stroke="#7c3aed" stroke-width="3.3" points="{freq_ser}"/>')
+    parts.append(_text(width / 2, bottom_bottom + 54, "true carrier offset (rad/sample)", anchor="middle", size=16, fill="#374151"))
+    parts.append(_text(28, (bottom_top + bottom_bottom) / 2, "symbol error rate", anchor="middle", size=16, fill="#374151", transform=f'rotate(-90 28 {(bottom_top + bottom_bottom) / 2:.1f})'))
+    parts.append(f'<rect x="{panel_right - 236:.1f}" y="{bottom_top + 24:.1f}" width="196" height="64" rx="14" fill="#ffffff" stroke="#e2e8f0"/>')
+    parts.append(_line(panel_right - 218, bottom_top + 46, panel_right - 190, bottom_top + 46, stroke="#ef4444", width=3.0))
+    parts.append(_text(panel_right - 178, bottom_top + 50, "phase-only", size=13, fill="#ef4444", weight="700"))
+    parts.append(_line(panel_right - 218, bottom_top + 68, panel_right - 190, bottom_top + 68, stroke="#7c3aed", width=3.2))
+    parts.append(_text(panel_right - 178, bottom_top + 72, "freq-acquired", size=13, fill="#7c3aed", weight="700"))
+
+    false_clean = next((row for row in rows if abs(row.freq_offset) > alias_limit and row.freq_acquired_tracked_rms_error < 0.10), rows[-1])
+    parts.append(_paragraph(panel_left + 900, bottom_top + 44, [f'At {false_clean.freq_offset:+.2f} rad/sample:', f'RMS {false_clean.freq_acquired_tracked_rms_error:.3f}, SER {false_clean.freq_acquired_symbol_error_rate:.2f}.'], size=12, fill="#475569", line_height=15))
 
     parts.append('</svg>')
     output.write_text("\n".join(parts) + "\n")
